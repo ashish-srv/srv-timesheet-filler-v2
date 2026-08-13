@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Admin — SRV Timesheet</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+* { box-sizing:border-box; margin:0; padding:0; }
+:root { --brand:#D62839; --brand-dark:#C41230; --navy:#0B1730; --bg:#F5F6F8; --ink:#111827; --muted:#6B7280; --line:#E5E7EB; --green:#16A34A; --green-bg:#F0FDF4; --red:#DC2626; --red-bg:#FEF2F2; }
+body { font-family:'Inter',sans-serif; background:var(--bg); color:var(--ink); min-height:100vh; }
+.navbar { background:linear-gradient(135deg,#071226,var(--navy)); padding:14px 32px; }
+.navbar-content { display:flex; align-items:center; gap:12px; max-width:900px; margin:0 auto; }
+.navbar-logo { height:34px; } .navbar-title { color:#fff; font-size:18px; font-weight:600; }
+.navbar-right { margin-left:auto; display:flex; align-items:center; gap:14px; }
+.nav-link { color:#CBD5E1; font-size:13px; font-weight:600; text-decoration:none; } .nav-link:hover { color:#fff; }
+.nav-user { color:#9AA4B2; font-size:13px; }
+.wrap { max-width:900px; margin:0 auto; padding:28px 20px 60px; }
+.card { background:#fff; border:1px solid var(--line); border-radius:14px; padding:24px; margin-bottom:20px; box-shadow:0 1px 3px rgba(0,0,0,.04); }
+.card h2 { font-size:16px; font-weight:600; margin-bottom:4px; }
+.hint { font-size:13px; color:var(--muted); margin-bottom:18px; line-height:1.5; }
+.stat-row { display:flex; gap:14px; margin-bottom:6px; }
+.stat { background:#F9FAFB; border:1px solid var(--line); border-radius:10px; padding:14px 20px; }
+.stat .n { font-size:24px; font-weight:700; } .stat .l { font-size:12px; color:var(--muted); }
+input[type=file] { width:100%; border:1.5px solid var(--line); border-radius:8px; padding:11px 13px; font-size:14px; }
+.btn { padding:11px 20px; border:none; border-radius:8px; font-size:14px; font-weight:600; font-family:'Inter',sans-serif; cursor:pointer; }
+.btn-primary { background:linear-gradient(135deg,var(--brand),var(--brand-dark)); color:#fff; }
+.btn-ghost { background:#fff; color:#374151; border:1.5px solid var(--line); }
+.btn:disabled { opacity:.55; cursor:not-allowed; }
+.toast { padding:12px 16px; border-radius:8px; font-size:13px; margin-top:14px; display:none; line-height:1.6; }
+.toast.ok { background:var(--green-bg); border:1px solid var(--green); color:#166534; display:block; }
+.toast.err { background:var(--red-bg); border:1px solid var(--red); color:#991B1B; display:block; }
+.spinner { display:inline-block; width:15px; height:15px; border:2px solid rgba(255,255,255,.35); border-top-color:#fff; border-radius:50%; animation:spin .7s linear infinite; vertical-align:middle; margin-right:7px; } @keyframes spin { to { transform:rotate(360deg); } }
+.footer { text-align:center; padding:24px; color:var(--muted); font-size:12px; }
+.mono { font-family:ui-monospace,Menlo,Consolas,monospace; font-size:12px; color:#374151; background:#F3F4F6; padding:2px 6px; border-radius:4px; }
+</style>
+</head>
+<body>
+<nav class="navbar"><div class="navbar-content">
+  <img src="/assets/srv-logo.png" class="navbar-logo" alt="SRV" onerror="this.style.display='none'">
+  <span class="navbar-title">Admin</span>
+  <div class="navbar-right">
+    <a class="nav-link" href="/app">← Back to app</a>
+    <span class="nav-user" id="navUser"></span>
+    <a class="nav-link" href="/logout">Sign out</a>
+  </div>
+</div></nav>
+
+<div class="wrap">
+  <div class="card">
+    <h2>Employee roster</h2>
+    <div class="hint">The roster controls who can sign in and who each person's approving manager is.</div>
+    <div class="stat-row">
+      <div class="stat"><div class="n" id="activeCount">–</div><div class="l">Active employees</div></div>
+      <div class="stat"><div class="n" id="totalCount">–</div><div class="l">Total (incl. inactive)</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Upload roster (CSV export of the HR sheet)</h2>
+    <div class="hint">
+      A manual fallback if you're not using live sync. The app reads only these columns:
+      <span class="mono">Employee Name</span>, <span class="mono">Email Address</span>,
+      <span class="mono">Reporting Manager</span>, <span class="mono">Reporting Manager Email ID</span>,
+      <span class="mono">leftorg</span>, <span class="mono">leavingDate</span>
+      (leftorg / leavingDate decide who's inactive). Every other column is ignored and never stored.
+    </div>
+    <div style="display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap;">
+      <input type="file" id="rosterFile" accept=".csv" style="flex:1; min-width:240px;">
+      <button class="btn btn-primary" id="uploadBtn" onclick="uploadRoster()">Upload &amp; update roster</button>
+    </div>
+    <div class="toast" id="uploadToast"></div>
+  </div>
+
+  <div class="card">
+    <h2>Timesheet entries</h2>
+    <div class="hint">Overview of everything in the approval queue. Once entries are approved and pushed to ProofHub, you can clear them from the app database here.</div>
+    <div class="stat-row" id="entryStats" style="flex-wrap:wrap;">
+      <div class="stat"><div class="n" id="eTotal">–</div><div class="l">Total</div></div>
+      <div class="stat"><div class="n" id="ePending">–</div><div class="l">Pending</div></div>
+      <div class="stat"><div class="n" id="eApproved">–</div><div class="l">Approved</div></div>
+      <div class="stat"><div class="n" id="eSynced">–</div><div class="l">Sent to ProofHub</div></div>
+      <div class="stat"><div class="n" id="eRejected">–</div><div class="l">Rejected</div></div>
+      <div class="stat"><div class="n" id="eFailed">–</div><div class="l">Sync failed</div></div>
+    </div>
+    <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:16px;">
+      <button class="btn btn-ghost" onclick="cleanup('synced')">Delete sent-to-ProofHub entries</button>
+      <button class="btn btn-ghost" onclick="cleanup('reviewed')">Delete all reviewed (approved + rejected)</button>
+      <button class="btn btn-ghost" style="border-color:#FCA5A5; color:#991B1B;" onclick="cleanup('all')">Delete ALL entries</button>
+    </div>
+    <div class="toast" id="cleanupToast"></div>
+  </div>
+
+  <div class="card">
+    <h2>Live Google Sheets sync</h2>
+    <div class="hint">Once the Google service account is configured, this pulls the sheet directly — no manual export. Until then it will report that it isn't set up yet.</div>
+    <button class="btn btn-ghost" id="syncBtn" onclick="syncSheet()">Sync from Google Sheet now</button>
+    <div class="toast" id="syncToast"></div>
+  </div>
+</div>
+
+<div class="footer">© 2026 SRV Media • Timesheet Compliance • Internal Use Only</div>
+
+<script>
+function showToast(id,ok,msg){ const t=document.getElementById(id); t.className='toast '+(ok?'ok':'err'); t.innerHTML=msg; }
+async function loadStats(){
+  try{ const s=await (await fetch('/admin/stats')).json();
+    document.getElementById('activeCount').textContent=s.active;
+    document.getElementById('totalCount').textContent=s.total;
+  }catch(e){}
+}
+async function loadEntryStats(){
+  try{ const s=await (await fetch('/admin/entries-summary')).json();
+    document.getElementById('eTotal').textContent=s.total;
+    document.getElementById('ePending').textContent=s.pending;
+    document.getElementById('eApproved').textContent=s.approved;
+    document.getElementById('eSynced').textContent=s.synced;
+    document.getElementById('eRejected').textContent=s.rejected;
+    document.getElementById('eFailed').textContent=s.failed;
+  }catch(e){}
+}
+const CLEAN_LABELS={synced:'sent-to-ProofHub',reviewed:'reviewed (approved + rejected)',all:'ALL'};
+async function cleanup(scope){
+  if(!confirm('Delete '+CLEAN_LABELS[scope]+' entries from the app database? This cannot be undone. (Entries already logged in ProofHub stay in ProofHub.)')) return;
+  const fd=new FormData(); fd.append('scope',scope);
+  try{
+    const d=await (await fetch('/admin/cleanup',{method:'POST',body:fd})).json();
+    if(d.success) showToast('cleanupToast',true,'✓ Deleted '+d.deleted+' entr'+(d.deleted===1?'y':'ies')+'.');
+    else showToast('cleanupToast',false,'✗ '+(d.message||'Failed.'));
+  }catch(e){ showToast('cleanupToast',false,'✗ Network error.'); }
+  loadEntryStats();
+}
+window.addEventListener('DOMContentLoaded', async () => {
+  try{ const me=await (await fetch('/me')).json(); document.getElementById('navUser').textContent=me.name; }catch(e){}
+  loadStats(); loadEntryStats();
+});
+async function uploadRoster(){
+  const f=document.getElementById('rosterFile').files[0];
+  if(!f){ showToast('uploadToast',false,'Choose a CSV file first.'); return; }
+  const btn=document.getElementById('uploadBtn'); btn.disabled=true; btn.innerHTML='<span class="spinner"></span>Updating…';
+  const fd=new FormData(); fd.append('file',f);
+  try{
+    const d=await (await fetch('/admin/upload-roster',{method:'POST',body:fd})).json();
+    if(d.success) showToast('uploadToast',true,'✓ Roster updated.<br>Rows read: '+d.rows_in_sheet+' · Upserted: '+d.upserted+' · Active: '+d.active+' · Marked inactive (not in file): '+d.deactivated_missing);
+    else showToast('uploadToast',false,'✗ '+d.message);
+  }catch(e){ showToast('uploadToast',false,'✗ Network error.'); }
+  btn.disabled=false; btn.textContent='Upload & update roster'; loadStats();
+}
+async function syncSheet(){
+  const btn=document.getElementById('syncBtn'); btn.disabled=true; btn.innerHTML='<span class="spinner"></span>Syncing…';
+  try{
+    const r=await fetch('/admin/sync-roster',{method:'POST'}); const d=await r.json();
+    if(d.success) showToast('syncToast',true,'✓ Synced from Google Sheet. Active: '+d.active+' · Inactive removed: '+d.deactivated_missing);
+    else showToast('syncToast',false,'✗ '+(d.message||'Not configured yet.'));
+  }catch(e){ showToast('syncToast',false,'✗ Not configured yet.'); }
+  btn.disabled=false; btn.textContent='Sync from Google Sheet now'; loadStats();
+}
+</script>
+</body>
+</html>

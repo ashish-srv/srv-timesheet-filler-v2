@@ -1,0 +1,8 @@
+email,name,manager_email,team,role
+priya.sharma@srvmedia.com,Priya Sharma,rahul.mehta@srvmedia.com,SEO,user
+amit.verma@srvmedia.com,Amit Verma,rahul.mehta@srvmedia.com,SEO,user
+sneha.iyer@srvmedia.com,Sneha Iyer,rahul.mehta@srvmedia.com,PPC,user
+rahul.mehta@srvmedia.com,Rahul Mehta,anita.desai@srvmedia.com,SEO,manager
+karan.singh@srvmedia.com,Karan Singh,anita.desai@srvmedia.com,Content,user
+riya.intern@gmail.com,Riya (Intern),rahul.mehta@srvmedia.com,SEO,user
+anita.desai@srvmedia.com,Anita Desai,,Leadership,admin

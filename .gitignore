@@ -1,0 +1,24 @@
+# ── Secrets / credentials — NEVER commit ──
+sa.json
+*service-account*.json
+*.pem
+.env
+# run_dev.bat holds the Google client secret + SMTP app password
+run_dev.bat
+
+# ── Local database (roster + stored ProofHub API keys) ──
+data/app.db
+*.db
+*.sqlite3
+
+# ── Python / virtual environment ──
+venv/
+env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# ── Backups / scratch ──
+_backup_*/
+*.log

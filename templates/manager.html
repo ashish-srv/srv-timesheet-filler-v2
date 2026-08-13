@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Manager Review — SRV Timesheet</title>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+* { box-sizing:border-box; margin:0; padding:0; }
+:root { --brand:#D62839; --brand-dark:#C41230; --navy:#0B1730; --bg:#F5F6F8; --ink:#111827; --muted:#6B7280; --line:#E5E7EB; --green:#16A34A; --green-bg:#F0FDF4; --red:#DC2626; --red-bg:#FEF2F2; }
+body { font-family:'Inter',sans-serif; background:var(--bg); color:var(--ink); min-height:100vh; }
+.navbar { background:linear-gradient(135deg,#071226,var(--navy)); padding:14px 32px; }
+.navbar-content { display:flex; align-items:center; gap:12px; max-width:1200px; margin:0 auto; }
+.navbar-logo { height:34px; }
+.navbar-title { color:#fff; font-size:18px; font-weight:600; }
+.navbar-right { margin-left:auto; display:flex; align-items:center; gap:14px; }
+.nav-link { color:#CBD5E1; font-size:13px; font-weight:600; text-decoration:none; } .nav-link:hover { color:#fff; }
+.nav-user { color:#9AA4B2; font-size:13px; }
+.wrap { max-width:1200px; margin:0 auto; padding:28px 20px 60px; }
+.card { background:#fff; border:1px solid var(--line); border-radius:14px; padding:24px; box-shadow:0 1px 3px rgba(0,0,0,.04); }
+.head { display:flex; align-items:center; gap:14px; margin-bottom:6px; }
+.head h2 { font-size:18px; font-weight:600; }
+.count-pill { background:#FEF3C7; color:#92400E; font-size:12px; font-weight:700; padding:4px 12px; border-radius:999px; }
+.hint { font-size:13px; color:var(--muted); margin-bottom:18px; }
+.toolbar { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:14px; }
+.btn { padding:10px 18px; border:none; border-radius:8px; font-size:14px; font-weight:600; font-family:'Inter',sans-serif; cursor:pointer; transition:all .15s; }
+.btn-approve { background:linear-gradient(135deg,#16A34A,#15803D); color:#fff; }
+.btn-reject { background:#fff; color:var(--red); border:1.5px solid #FCA5A5; }
+.btn-ghost { background:#fff; color:#374151; border:1.5px solid var(--line); }
+.btn:disabled { opacity:.5; cursor:not-allowed; }
+.sel-info { font-size:13px; color:var(--muted); margin-left:auto; }
+.table-scroll { overflow-x:auto; border:1px solid var(--line); border-radius:10px; }
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th { background:#F9FAFB; text-align:left; padding:10px 12px; font-weight:600; color:#374151; border-bottom:1px solid var(--line); white-space:nowrap; position:sticky; top:0; }
+td { padding:9px 12px; border-bottom:1px solid #F3F4F6; vertical-align:top; }
+tr.grouphdr td { background:#F3F4F6; font-weight:600; }
+tr.grouphdr .gname { font-size:14px; color:var(--navy); }
+tr.grouphdr .gmail { font-weight:400; color:var(--muted); font-size:12px; margin-left:8px; }
+.userbar { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:16px; }
+.uchip { padding:7px 14px; border-radius:999px; font-size:13px; font-weight:600; border:1.5px solid var(--line); background:#fff; color:#374151; cursor:pointer; display:flex; align-items:center; gap:7px; }
+.uchip:hover { border-color:var(--brand); }
+.uchip.active { background:var(--navy); color:#fff; border-color:var(--navy); }
+.uchip .ucount { background:rgba(0,0,0,.08); border-radius:999px; padding:1px 8px; font-size:12px; }
+.uchip.active .ucount { background:rgba(255,255,255,.22); }
+.uchip.unassigned { border-color:#FCA5A5; color:#991B1B; }
+input[type=checkbox] { width:16px; height:16px; cursor:pointer; }
+.empty { text-align:center; color:var(--muted); padding:48px 0; font-size:14px; }
+.progress-outer { background:#E5E7EB; border-radius:999px; height:12px; overflow:hidden; margin:16px 0 8px; } .progress-inner { background:linear-gradient(90deg,#16A34A,#15803D); height:100%; width:0; transition:width .3s; }
+.progress-label { font-size:13px; color:var(--muted); }
+.toast { padding:12px 16px; border-radius:8px; font-size:13px; margin-top:14px; display:none; } .toast.ok { background:var(--green-bg); border:1px solid var(--green); color:#166534; display:block; } .toast.err { background:var(--red-bg); border:1px solid var(--red); color:#991B1B; display:block; }
+.modal-bg { display:none; position:fixed; inset:0; background:rgba(0,0,0,.4); align-items:center; justify-content:center; z-index:10; }
+.modal { background:#fff; border-radius:14px; padding:24px; width:100%; max-width:460px; }
+.modal h3 { font-size:16px; margin-bottom:8px; } .modal p { font-size:13px; color:var(--muted); margin-bottom:14px; }
+textarea { width:100%; border:1.5px solid var(--line); border-radius:8px; padding:11px 13px; font-size:14px; font-family:'Inter',sans-serif; min-height:90px; }
+.modal-actions { display:flex; gap:10px; justify-content:flex-end; margin-top:16px; }
+.spinner { display:inline-block; width:15px; height:15px; border:2px solid rgba(255,255,255,.35); border-top-color:#fff; border-radius:50%; animation:spin .7s linear infinite; vertical-align:middle; margin-right:7px; } @keyframes spin { to { transform:rotate(360deg); } }
+.footer { text-align:center; padding:24px; color:var(--muted); font-size:12px; }
+</style>
+</head>
+<body>
+<nav class="navbar"><div class="navbar-content">
+  <img src="/assets/srv-logo.png" class="navbar-logo" alt="SRV" onerror="this.style.display='none'">
+  <span class="navbar-title">Manager Review</span>
+  <div class="navbar-right">
+    <a class="nav-link" href="/app">← Back to app</a>
+    <span class="nav-user" id="navUser"></span>
+    <a class="nav-link" href="/logout">Sign out</a>
+  </div>
+</div></nav>
+
+<div class="wrap">
+  <div class="card">
+    <div class="head"><h2>Pending timesheet approvals</h2><span class="count-pill" id="countPill">0</span></div>
+    <div class="hint">Review entries submitted by your team. Click a person's name to see just their entries. Tick the ones to approve (or use “Select all” and untick the invalid ones), then Approve. Rejected entries email the employee with your reason.</div>
+
+    <div class="userbar" id="userBar"></div>
+
+    <div class="toolbar">
+      <label style="display:flex; align-items:center; gap:8px; font-size:13px; font-weight:600; color:#374151;"><input type="checkbox" id="selAll" onclick="toggleAll(this)"> Select all</label>
+      <button class="btn btn-approve" id="approveBtn" onclick="approveSelected()" disabled>Approve selected</button>
+      <button class="btn btn-reject" id="rejectBtn" onclick="openReject()" disabled>Reject selected</button>
+      <button class="btn btn-ghost" onclick="loadPending()">Refresh</button>
+      <span class="sel-info" id="selInfo">0 selected</span>
+    </div>
+
+    <div id="tableWrap" class="table-scroll">
+      <table>
+        <thead><tr><th></th><th>Employee</th><th>Date</th><th>Project</th><th>Timesheet</th><th>H</th><th>M</th><th>Billable</th><th>Description</th><th>Source</th></tr></thead>
+        <tbody id="pendingBody"></tbody>
+      </table>
+    </div>
+    <div class="empty" id="emptyState" style="display:none;">🎉 No pending entries. Your team is all caught up.</div>
+
+    <div id="progressArea" style="display:none;">
+      <div class="progress-outer"><div class="progress-inner" id="progressBar"></div></div>
+      <div class="progress-label" id="progressLabel">Starting…</div>
+    </div>
+    <div class="toast" id="resultToast"></div>
+  </div>
+</div>
+
+<!-- Reject modal -->
+<div class="modal-bg" id="rejectModal">
+  <div class="modal">
+    <h3>Reject selected entries</h3>
+    <p>The employee(s) will be emailed with the reason below.</p>
+    <textarea id="rejectReason" placeholder="Reason for rejection (e.g. wrong project, duplicate, needs correction)…"></textarea>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeReject()">Cancel</button>
+      <button class="btn btn-reject" id="confirmRejectBtn" onclick="confirmReject()">Reject &amp; notify</button>
+    </div>
+  </div>
+</div>
+
+<div class="footer">© 2026 SRV Media • Timesheet Compliance • Internal Use Only</div>
+
+<script>
+let pending = [];
+let pollTimer = null;
+let userFilter = '__all__';   // which submitter is currently shown
+
+function esc(x){ return String(x==null?'':x).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c])); }
+function nameOf(e){ return e.submitter_name || e.submitter_email || 'Unknown'; }
+function showToast(ok,msg){ const t=document.getElementById('resultToast'); t.className='toast '+(ok?'ok':'err'); t.textContent=msg; }
+
+window.addEventListener('DOMContentLoaded', async () => {
+  try { const me=await (await fetch('/me')).json(); document.getElementById('navUser').textContent=me.name; } catch(e){}
+  loadPending();
+});
+
+async function loadPending(){
+  document.getElementById('resultToast').style.display='none';
+  document.getElementById('progressArea').style.display='none';
+  try{
+    const data=await (await fetch('/pending')).json();
+    pending=data.pending||[];
+  }catch(e){ pending=[]; }
+  document.getElementById('countPill').textContent=pending.length;
+  // If the person we were filtered to has no more pending entries, show all.
+  if(userFilter!=='__all__' && !pending.some(e=>(e.submitter_email||'')===userFilter)) userFilter='__all__';
+  render();
+}
+
+function renderUserBar(){
+  // Build one chip per submitter (name + pending count), plus an "All" chip.
+  const groups={}; const order=[];
+  pending.forEach(e=>{ const k=e.submitter_email||''; if(!(k in groups)){ groups[k]={name:nameOf(e),email:k,count:0}; order.push(k);} groups[k].count++; });
+  const bar=document.getElementById('userBar'); bar.innerHTML='';
+  if(!pending.length){ return; }
+  const all=document.createElement('div');
+  all.className='uchip'+(userFilter==='__all__'?' active':'');
+  all.innerHTML='All people <span class="ucount">'+pending.length+'</span>';
+  all.onclick=()=>{ userFilter='__all__'; render(); };
+  bar.appendChild(all);
+  order.forEach(k=>{
+    const g=groups[k]; const d=document.createElement('div');
+    const unassigned = !k;
+    d.className='uchip'+(userFilter===k?' active':'')+(unassigned?' unassigned':'');
+    d.innerHTML=esc(g.name)+(unassigned?' (no manager set)':'')+' <span class="ucount">'+g.count+'</span>';
+    d.onclick=()=>{ userFilter=k; render(); };
+    bar.appendChild(d);
+  });
+}
+
+function render(){
+  renderUserBar();
+  const body=document.getElementById('pendingBody'); body.innerHTML='';
+  const rows = userFilter==='__all__' ? pending : pending.filter(e=>(e.submitter_email||'')===userFilter);
+  document.getElementById('emptyState').style.display = rows.length ? 'none':'block';
+  document.getElementById('tableWrap').style.display = rows.length ? 'block':'none';
+  let lastUser=null;
+  rows.forEach(e=>{
+    if(e.submitter_email!==lastUser){
+      lastUser=e.submitter_email;
+      const g=document.createElement('tr'); g.className='grouphdr';
+      const label='<span class="gname">'+esc(nameOf(e))+'</span><span class="gmail">'+esc(e.submitter_email||'no email')+'</span>';
+      g.innerHTML='<td></td><td colspan="9">'+label+'</td>'; body.appendChild(g);
+    }
+    const tr=document.createElement('tr');
+    tr.innerHTML='<td><input type="checkbox" class="rowchk" value="'+e.id+'" onchange="updateSel()"></td>'
+      +'<td><b>'+esc(nameOf(e))+'</b></td><td>'+esc(e.date)+'</td><td>'+esc(e.project_name)+'</td><td>'+esc(e.timesheet_title||'')+'</td>'
+      +'<td>'+esc(e.logged_hours)+'</td><td>'+esc(e.logged_mins)+'</td><td>'+esc(e.status)+'</td><td>'+esc(e.description)+'</td><td>'+esc(e.source)+'</td>';
+    body.appendChild(tr);
+  });
+  document.getElementById('selAll').checked=false;
+  updateSel();
+}
+
+function selectedIds(){ return Array.from(document.querySelectorAll('.rowchk:checked')).map(c=>parseInt(c.value)); }
+function toggleAll(box){ document.querySelectorAll('.rowchk').forEach(c=>c.checked=box.checked); updateSel(); }
+function updateSel(){
+  const n=selectedIds().length;
+  document.getElementById('selInfo').textContent=n+' selected';
+  document.getElementById('approveBtn').disabled=n===0;
+  document.getElementById('rejectBtn').disabled=n===0;
+}
+
+async function approveSelected(){
+  const ids=selectedIds(); if(!ids.length) return;
+  const btn=document.getElementById('approveBtn'); btn.disabled=true; btn.innerHTML='<span class="spinner"></span>Approving…';
+  const fd=new FormData(); fd.append('ids',JSON.stringify(ids));
+  try{
+    const data=await (await fetch('/approve',{method:'POST',body:fd})).json();
+    if(!data.success){ showToast(false,data.message); btn.disabled=false; btn.textContent='Approve selected'; return; }
+    document.getElementById('progressArea').style.display='block';
+    pollProgress(data.job_id,data.total,'approved & pushed to ProofHub');
+  }catch(e){ showToast(false,'Network error.'); btn.disabled=false; btn.textContent='Approve selected'; }
+}
+
+function pollProgress(jobId,total,verb){
+  pollTimer=setInterval(async()=>{
+    try{
+      const j=await (await fetch('/progress/'+jobId)).json();
+      const pct=total?Math.round((j.processed/total)*100):0;
+      document.getElementById('progressBar').style.width=pct+'%';
+      document.getElementById('progressLabel').textContent='Processed '+j.processed+' / '+total+'  ·  ✓ '+j.success_count+'  ✗ '+j.failed_count;
+      if(j.status==='done'||j.status==='failed'){
+        clearInterval(pollTimer);
+        document.getElementById('approveBtn').textContent='Approve selected';
+        showToast(true, j.success_count+' '+verb+', '+j.failed_count+' failed.');
+        loadPending();
+      }
+    }catch(e){}
+  },1000);
+}
+
+// ---- reject ----
+function openReject(){ if(!selectedIds().length) return; document.getElementById('rejectReason').value=''; document.getElementById('rejectModal').style.display='flex'; }
+function closeReject(){ document.getElementById('rejectModal').style.display='none'; }
+async function confirmReject(){
+  const ids=selectedIds(); if(!ids.length) return;
+  const reason=document.getElementById('rejectReason').value.trim();
+  const btn=document.getElementById('confirmRejectBtn'); btn.disabled=true; btn.innerHTML='<span class="spinner"></span>Rejecting…';
+  const fd=new FormData(); fd.append('ids',JSON.stringify(ids)); fd.append('reason',reason);
+  try{
+    const data=await (await fetch('/reject',{method:'POST',body:fd})).json();
+    closeReject();
+    if(data.success){ const okMails=(data.emails||[]).filter(e=>e.email_ok).length; showToast(true,'Rejected '+data.rejected+' entr'+(data.rejected>1?'ies':'y')+'. Notified '+okMails+' employee(s).'); }
+    else showToast(false,data.message);
+  }catch(e){ closeReject(); showToast(false,'Network error.'); }
+  btn.disabled=false; btn.textContent='Reject & notify'; loadPending();
+}
+</script>
+</body>
+</html>

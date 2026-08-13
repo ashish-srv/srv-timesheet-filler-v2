@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+pandas
+requests
+python-dateutil
+python-multipart
+jinja2
+aiofiles
+authlib
+itsdangerous
+httpx
+gspread
+google-auth
