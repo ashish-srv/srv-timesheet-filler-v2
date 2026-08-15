@@ -1,46 +1,102 @@
 """
-SQLite persistence layer for the ProofHub Time Compliance app (Tier B).
+PostgreSQL persistence layer for the ProofHub Time Compliance app.
 
 Holds the employee roster (for manager routing), the pending time-entry queue
 (entries wait here until a manager approves/rejects), stored ProofHub API keys,
 sent-email log, and an audit trail.
 
-Pure stdlib sqlite3 — no external DB service — so it runs anywhere the Docker
-container runs and migrates cleanly to Postgres later.
+Connects via DATABASE_URL (Replit provisions this automatically for its built-in
+Postgres). Uses a small connection pool so concurrent submissions don't block
+each other the way the old single-file SQLite database did.
+
+Timestamps are stored as TEXT in 'YYYY-MM-DD HH:MM:SS' form, rendered in the
+company timezone (APP_TIMEZONE, default Asia/Kolkata) rather than the server's
+UTC clock. That format sorts lexicographically, so ordering and age-based
+retention both work on plain string comparison.
 """
 import os
 import json
-import sqlite3
-import threading
-from datetime import datetime
+import uuid
+from contextlib import contextmanager
+from datetime import datetime, timedelta
 
-DB_PATH = os.environ.get("DB_PATH", os.path.join("data", "app.db"))
-_lock = threading.Lock()
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover - Python < 3.9
+    ZoneInfo = None
+
+import psycopg
+from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
+
+DATABASE_URL = os.environ.get("DATABASE_URL", "")
+APP_TIMEZONE = os.environ.get("APP_TIMEZONE", "Asia/Kolkata")
+
+# How many recent submission batches a user sees in "My Entries".
+MY_ENTRIES_SUBMISSIONS = int(os.environ.get("MY_ENTRIES_SUBMISSIONS", "3"))
+# Auto-delete approved+synced entries older than this many days (0 = never).
+RETENTION_DAYS = int(os.environ.get("ENTRY_RETENTION_DAYS", "365"))
+
+_pool_obj = None
 
 
-def _conn():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+def _pool():
+    global _pool_obj
+    if _pool_obj is None:
+        if not DATABASE_URL:
+            raise RuntimeError(
+                "DATABASE_URL is not set. On Replit, add the PostgreSQL "
+                "integration; it provides this automatically."
+            )
+        _pool_obj = ConnectionPool(
+            DATABASE_URL,
+            min_size=1,
+            max_size=int(os.environ.get("DB_POOL_MAX", "10")),
+            kwargs={"row_factory": dict_row},
+            open=True,
+        )
+    return _pool_obj
 
 
-LEGACY_EMP_COLS = ["dept_head_email", "employee_id", "team",
-                   "sub_department", "cluster", "location"]
+@contextmanager
+def _cur():
+    """Yield a cursor inside a transaction that commits on clean exit."""
+    with _pool().connection() as conn:
+        with conn.cursor() as cur:
+            yield cur
+
+
+def _now():
+    if ZoneInfo:
+        try:
+            return datetime.now(ZoneInfo(APP_TIMEZONE)).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _days_ago(n):
+    if ZoneInfo:
+        try:
+            base = datetime.now(ZoneInfo(APP_TIMEZONE))
+        except Exception:
+            base = datetime.now()
+    else:
+        base = datetime.now()
+    return (base - timedelta(days=n)).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def init_db():
-    os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
-    with _lock, _conn() as c:
-        c.executescript(
+    with _cur() as c:
+        c.execute(
             """
             CREATE TABLE IF NOT EXISTS employees (
                 email           TEXT PRIMARY KEY,
-                name            TEXT,           -- shown to manager + used in emails
-                manager_name    TEXT,           -- approver's name (for display)
-                manager_email   TEXT,           -- approval routing
-                role            TEXT DEFAULT 'user',   -- access role (defaults to user)
-                active          INTEGER DEFAULT 1      -- derived from leaving info
+                name            TEXT,
+                manager_name    TEXT,
+                manager_email   TEXT,
+                role            TEXT DEFAULT 'user',
+                active          SMALLINT DEFAULT 1
             );
 
             CREATE TABLE IF NOT EXISTS api_keys (
@@ -50,7 +106,8 @@ def init_db():
             );
 
             CREATE TABLE IF NOT EXISTS entries (
-                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                id              BIGSERIAL PRIMARY KEY,
+                batch_id        TEXT,
                 submitter_email TEXT NOT NULL,
                 manager_email   TEXT,
                 project_id      TEXT,
@@ -60,101 +117,94 @@ def init_db():
                 date            TEXT,
                 logged_hours    TEXT,
                 logged_mins     TEXT,
-                status          TEXT,          -- billable / non-billable
+                status          TEXT,
                 description     TEXT,
-                source          TEXT,          -- manual / csv
-                approval_status TEXT DEFAULT 'pending',  -- pending / approved / rejected
+                source          TEXT,
+                approval_status TEXT DEFAULT 'pending',
                 reject_reason   TEXT,
                 reviewed_by     TEXT,
                 reviewed_at     TEXT,
                 proofhub_entry_id TEXT,
-                sync_status     TEXT DEFAULT 'not_synced', -- not_synced / synced / failed
+                sync_status     TEXT DEFAULT 'not_synced',
                 sync_message    TEXT,
                 submitted_at    TEXT
             );
 
             CREATE TABLE IF NOT EXISTS email_log (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                id          BIGSERIAL PRIMARY KEY,
                 to_email    TEXT,
                 subject     TEXT,
                 body        TEXT,
-                sent_ok     INTEGER,
+                sent_ok     SMALLINT,
                 error       TEXT,
                 created_at  TEXT
             );
 
             CREATE TABLE IF NOT EXISTS audit_log (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                id          BIGSERIAL PRIMARY KEY,
                 actor       TEXT,
                 action      TEXT,
                 detail      TEXT,
                 created_at  TEXT
             );
+
+            CREATE INDEX IF NOT EXISTS idx_entries_submitter
+                ON entries (submitter_email, submitted_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_entries_manager_pending
+                ON entries (manager_email, approval_status);
+            CREATE INDEX IF NOT EXISTS idx_entries_batch
+                ON entries (batch_id);
+            CREATE INDEX IF NOT EXISTS idx_employees_manager
+                ON employees (manager_email);
             """
         )
-        # Migration: drop legacy roster columns we no longer collect, so old
-        # databases stop holding fields (employee id, department, etc.) the app
-        # doesn't use. Best-effort; harmless once already dropped.
-        try:
-            existing = [r["name"] for r in c.execute("PRAGMA table_info(employees)").fetchall()]
-            for col in LEGACY_EMP_COLS:
-                if col in existing:
-                    try:
-                        c.execute(f"ALTER TABLE employees DROP COLUMN {col}")
-                    except Exception:
-                        pass
-            # Add newer columns to older databases.
-            if "manager_name" not in existing:
-                try:
-                    c.execute("ALTER TABLE employees ADD COLUMN manager_name TEXT")
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-
-def _now():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        # Older databases created before batch_id existed.
+        c.execute("ALTER TABLE entries ADD COLUMN IF NOT EXISTS batch_id TEXT")
 
 
 # ---------------------------------------------------------------- roster
 def upsert_employees(rows):
-    """rows: list of dicts (already mapped) with keys email, name, manager_name,
-    manager_email, role, active. Only these operational fields are stored —
-    no employee id, department, cluster, location, etc."""
-    n = 0
-    with _lock, _conn() as c:
-        for r in rows:
-            email = (r.get("email") or "").strip().lower()
-            if not email:
-                continue
-            c.execute(
-                """INSERT INTO employees
-                   (email, name, manager_name, manager_email, role, active)
-                   VALUES (?,?,?,?,?,?)
-                   ON CONFLICT(email) DO UPDATE SET
-                     name=excluded.name, manager_name=excluded.manager_name,
-                     manager_email=excluded.manager_email, role=excluded.role,
-                     active=excluded.active""",
-                (email, r.get("name", ""), r.get("manager_name", ""),
-                 (r.get("manager_email") or "").strip().lower(),
-                 r.get("role", "user"), int(r.get("active", 1))),
-            )
-            n += 1
-    return n
+    """rows: list of dicts with keys email, name, manager_name, manager_email,
+    role, active. Only these operational fields are stored."""
+    payload = []
+    for r in rows:
+        email = (r.get("email") or "").strip().lower()
+        if not email:
+            continue
+        payload.append((
+            email, r.get("name", ""), r.get("manager_name", ""),
+            (r.get("manager_email") or "").strip().lower(),
+            r.get("role", "user"), int(r.get("active", 1)),
+        ))
+    if not payload:
+        return 0
+    with _cur() as c:
+        c.executemany(
+            """INSERT INTO employees
+               (email, name, manager_name, manager_email, role, active)
+               VALUES (%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (email) DO UPDATE SET
+                 name=EXCLUDED.name, manager_name=EXCLUDED.manager_name,
+                 manager_email=EXCLUDED.manager_email, role=EXCLUDED.role,
+                 active=EXCLUDED.active""",
+            payload,
+        )
+    return len(payload)
 
 
 def deactivate_missing(active_emails):
     """Set active=0 for anyone in the DB not present in the latest sheet."""
-    active_set = {e.strip().lower() for e in active_emails if e}
-    changed = 0
-    with _lock, _conn() as c:
-        rows = c.execute("SELECT email FROM employees WHERE active=1").fetchall()
-        for row in rows:
-            if row["email"] not in active_set:
-                c.execute("UPDATE employees SET active=0 WHERE email=?", (row["email"],))
-                changed += 1
-    return changed
+    active_set = sorted({e.strip().lower() for e in active_emails if e})
+    with _cur() as c:
+        if active_set:
+            c.execute(
+                "UPDATE employees SET active=0 "
+                "WHERE active=1 AND NOT (email = ANY(%s))",
+                (active_set,),
+            )
+        else:
+            c.execute("UPDATE employees SET active=0 WHERE active=1")
+        return c.rowcount
 
 
 # Back-compat alias used by the CSV seed path.
@@ -163,52 +213,54 @@ def seed_roster(rows):
 
 
 def count_employees(active_only=True):
-    with _conn() as c:
+    with _cur() as c:
         q = "SELECT COUNT(*) n FROM employees" + (" WHERE active=1" if active_only else "")
-        return c.execute(q).fetchone()["n"]
+        c.execute(q)
+        return c.fetchone()["n"]
 
 
 def get_employee(email):
-    with _conn() as c:
-        row = c.execute("SELECT * FROM employees WHERE email=?",
-                        (email.strip().lower(),)).fetchone()
+    with _cur() as c:
+        c.execute("SELECT * FROM employees WHERE email=%s", (email.strip().lower(),))
+        row = c.fetchone()
         return dict(row) if row else None
 
 
 def is_manager(email):
     """A person is a manager if anyone reports to them (or role says so)."""
     email = email.strip().lower()
-    with _conn() as c:
-        row = c.execute("SELECT COUNT(*) n FROM employees WHERE manager_email=?",
-                        (email,)).fetchone()
+    with _cur() as c:
+        c.execute("SELECT COUNT(*) n FROM employees WHERE manager_email=%s", (email,))
+        row = c.fetchone()
         if row and row["n"] > 0:
             return True
-        emp = c.execute("SELECT role FROM employees WHERE email=?", (email,)).fetchone()
+        c.execute("SELECT role FROM employees WHERE email=%s", (email,))
+        emp = c.fetchone()
         return bool(emp and emp["role"] in ("manager", "hr", "admin"))
 
 
 def reports_of(manager_email):
-    with _conn() as c:
-        rows = c.execute("SELECT email FROM employees WHERE manager_email=?",
-                         (manager_email.strip().lower(),)).fetchall()
-        return [r["email"] for r in rows]
+    with _cur() as c:
+        c.execute("SELECT email FROM employees WHERE manager_email=%s",
+                  (manager_email.strip().lower(),))
+        return [r["email"] for r in c.fetchall()]
 
 
 # ---------------------------------------------------------------- api keys
 def save_api_key(email, api_key):
-    with _lock, _conn() as c:
+    with _cur() as c:
         c.execute(
-            """INSERT INTO api_keys (email, api_key, updated_at) VALUES (?,?,?)
-               ON CONFLICT(email) DO UPDATE SET api_key=excluded.api_key,
-               updated_at=excluded.updated_at""",
+            """INSERT INTO api_keys (email, api_key, updated_at) VALUES (%s,%s,%s)
+               ON CONFLICT (email) DO UPDATE SET api_key=EXCLUDED.api_key,
+               updated_at=EXCLUDED.updated_at""",
             (email.strip().lower(), api_key, _now()),
         )
 
 
 def get_api_key(email):
-    with _conn() as c:
-        row = c.execute("SELECT api_key FROM api_keys WHERE email=?",
-                        (email.strip().lower(),)).fetchone()
+    with _cur() as c:
+        c.execute("SELECT api_key FROM api_keys WHERE email=%s", (email.strip().lower(),))
+        row = c.fetchone()
         return row["api_key"] if row else None
 
 
@@ -216,76 +268,146 @@ def has_api_key(email):
     return get_api_key(email) is not None
 
 
+def get_api_key_updated(email):
+    """When this user last saved their ProofHub key — shown in Settings so they
+    can tell whether the stored key is the one they think it is."""
+    with _cur() as c:
+        c.execute("SELECT updated_at FROM api_keys WHERE email=%s",
+                  (email.strip().lower(),))
+        row = c.fetchone()
+        return row["updated_at"] if row else None
+
+
+def delete_api_key(email):
+    """Remove a stored key (used by the 'Disconnect' action in Settings)."""
+    with _cur() as c:
+        c.execute("DELETE FROM api_keys WHERE email=%s", (email.strip().lower(),))
+        return c.rowcount
+
+
 # ---------------------------------------------------------------- entries
 def insert_pending_entries(submitter_email, manager_email, source, entries):
-    """entries: list of dicts (project_id, project_name, timesheet_id,
-    timesheet_title, date, logged_hours, logged_mins, status, description)."""
+    """One call = one 'submission'. All rows share a batch_id so 'My Entries'
+    can show the last N submissions rather than every row ever created."""
+    if not entries:
+        return []
+    batch_id = str(uuid.uuid4())
+    submitted_at = _now()
+    submitter = submitter_email.strip().lower()
+    manager = (manager_email or "").strip().lower()
     ids = []
-    with _lock, _conn() as c:
+    with _cur() as c:
         for e in entries:
-            cur = c.execute(
+            c.execute(
                 """INSERT INTO entries
-                   (submitter_email, manager_email, project_id, project_name,
+                   (batch_id, submitter_email, manager_email, project_id, project_name,
                     timesheet_id, timesheet_title, date, logged_hours, logged_mins,
                     status, description, source, approval_status, submitted_at)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'pending', ?)""",
-                (submitter_email.strip().lower(), (manager_email or "").strip().lower(),
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'pending',%s)
+                   RETURNING id""",
+                (batch_id, submitter, manager,
                  e.get("project_id"), e.get("project_name"), e.get("timesheet_id"),
                  e.get("timesheet_title"), e.get("date"), e.get("logged_hours"),
                  e.get("logged_mins"), e.get("status"), e.get("description"),
-                 source, _now()),
+                 source, submitted_at),
             )
-            ids.append(cur.lastrowid)
+            ids.append(c.fetchone()["id"])
     return ids
 
 
 def list_pending_for_manager(manager_email):
-    with _conn() as c:
-        rows = c.execute(
+    with _cur() as c:
+        c.execute(
             """SELECT e.*, emp.name AS submitter_name
                FROM entries e LEFT JOIN employees emp ON emp.email = e.submitter_email
-               WHERE e.manager_email=? AND e.approval_status='pending'
+               WHERE e.manager_email=%s AND e.approval_status='pending'
                ORDER BY e.submitter_email, e.date""",
             (manager_email.strip().lower(),),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        )
+        return [dict(r) for r in c.fetchall()]
 
 
 def list_pending_all():
     """Every pending entry, regardless of manager — used by admins so entries
     with a blank/unresolvable manager can never get stuck with no approver."""
-    with _conn() as c:
-        rows = c.execute(
+    with _cur() as c:
+        c.execute(
             """SELECT e.*, emp.name AS submitter_name
                FROM entries e LEFT JOIN employees emp ON emp.email = e.submitter_email
                WHERE e.approval_status='pending'
                ORDER BY e.submitter_email, e.date"""
-        ).fetchall()
-        return [dict(r) for r in rows]
+        )
+        return [dict(r) for r in c.fetchall()]
 
 
-def list_entries_for_user(email):
-    with _conn() as c:
-        rows = c.execute(
-            "SELECT * FROM entries WHERE submitter_email=? ORDER BY submitted_at DESC, id DESC",
+def list_entries_for_user(email, submissions=None):
+    """Return entries from the user's most recent N submission batches.
+
+    A 'submission' is one click of Submit (manual batch or CSV upload), so the
+    user sees whole batches rather than an arbitrary row count. Rows predating
+    batch_id (if any) are grouped by their submitted_at timestamp instead.
+    """
+    n = MY_ENTRIES_SUBMISSIONS if submissions is None else submissions
+    email = email.strip().lower()
+    with _cur() as c:
+        if n and n > 0:
+            c.execute(
+                """WITH recent AS (
+                       SELECT COALESCE(batch_id, submitted_at) AS grp,
+                              MAX(submitted_at) AS last_at,
+                              MAX(id) AS last_id
+                       FROM entries
+                       WHERE submitter_email=%s
+                       GROUP BY COALESCE(batch_id, submitted_at)
+                       ORDER BY last_at DESC, last_id DESC
+                       LIMIT %s
+                   )
+                   SELECT e.* FROM entries e
+                   JOIN recent r ON COALESCE(e.batch_id, e.submitted_at) = r.grp
+                   WHERE e.submitter_email=%s
+                   ORDER BY e.submitted_at DESC, e.id DESC""",
+                (email, n, email),
+            )
+        else:
+            c.execute(
+                "SELECT * FROM entries WHERE submitter_email=%s "
+                "ORDER BY submitted_at DESC, id DESC",
+                (email,),
+            )
+        return [dict(r) for r in c.fetchall()]
+
+
+def count_submissions_for_user(email):
+    """Total number of submission batches this user has ever made — lets the UI
+    say 'showing 3 of 12 submissions' instead of silently hiding history."""
+    with _cur() as c:
+        c.execute(
+            """SELECT COUNT(*) n FROM (
+                   SELECT COALESCE(batch_id, submitted_at) AS grp
+                   FROM entries WHERE submitter_email=%s
+                   GROUP BY COALESCE(batch_id, submitted_at)
+               ) t""",
             (email.strip().lower(),),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        )
+        return c.fetchone()["n"]
 
 
 def entries_summary():
     """Aggregate counts across all entries, for the admin dashboard/cleanup."""
-    with _conn() as c:
-        def n(q):
-            return c.execute(q).fetchone()["n"]
-        return {
-            "total": n("SELECT COUNT(*) n FROM entries"),
-            "pending": n("SELECT COUNT(*) n FROM entries WHERE approval_status='pending'"),
-            "approved": n("SELECT COUNT(*) n FROM entries WHERE approval_status='approved'"),
-            "rejected": n("SELECT COUNT(*) n FROM entries WHERE approval_status='rejected'"),
-            "synced": n("SELECT COUNT(*) n FROM entries WHERE approval_status='approved' AND sync_status='synced'"),
-            "failed": n("SELECT COUNT(*) n FROM entries WHERE approval_status='approved' AND sync_status='failed'"),
-        }
+    with _cur() as c:
+        c.execute(
+            """SELECT
+                 COUNT(*) AS total,
+                 COUNT(*) FILTER (WHERE approval_status='pending')  AS pending,
+                 COUNT(*) FILTER (WHERE approval_status='approved') AS approved,
+                 COUNT(*) FILTER (WHERE approval_status='rejected') AS rejected,
+                 COUNT(*) FILTER (WHERE approval_status='approved'
+                                  AND sync_status='synced') AS synced,
+                 COUNT(*) FILTER (WHERE approval_status='approved'
+                                  AND sync_status='failed') AS failed
+               FROM entries"""
+        )
+        return {k: int(v) for k, v in c.fetchone().items()}
 
 
 def delete_entries(scope):
@@ -297,56 +419,75 @@ def delete_entries(scope):
     where = {
         "synced": "approval_status='approved' AND sync_status='synced'",
         "reviewed": "approval_status IN ('approved','rejected')",
-        "all": "1=1",
+        "all": "TRUE",
     }.get(scope)
     if not where:
         return 0
-    with _lock, _conn() as c:
-        cur = c.execute(f"DELETE FROM entries WHERE {where}")
-        return cur.rowcount
+    with _cur() as c:
+        c.execute(f"DELETE FROM entries WHERE {where}")
+        return c.rowcount
+
+
+def purge_old_entries(days=None):
+    """Retention: drop entries that are finished AND older than `days`.
+
+    Only touches approved+synced rows — work that is done and already logged in
+    ProofHub. Pending and rejected entries are never removed by age, because
+    they represent work the employee still has to act on.
+    """
+    d = RETENTION_DAYS if days is None else days
+    if not d or d <= 0:
+        return 0
+    cutoff = _days_ago(d)
+    with _cur() as c:
+        c.execute(
+            "DELETE FROM entries WHERE approval_status='approved' "
+            "AND sync_status='synced' AND submitted_at < %s",
+            (cutoff,),
+        )
+        return c.rowcount
 
 
 def get_entries_by_ids(ids):
     if not ids:
         return []
-    q = ",".join("?" * len(ids))
-    with _conn() as c:
-        rows = c.execute(f"SELECT * FROM entries WHERE id IN ({q})", ids).fetchall()
-        return [dict(r) for r in rows]
+    with _cur() as c:
+        c.execute("SELECT * FROM entries WHERE id = ANY(%s)", ([int(i) for i in ids],))
+        return [dict(r) for r in c.fetchall()]
 
 
 def mark_approved(entry_id, reviewer, proofhub_entry_id, sync_status, sync_message):
-    with _lock, _conn() as c:
+    with _cur() as c:
         c.execute(
-            """UPDATE entries SET approval_status='approved', reviewed_by=?,
-               reviewed_at=?, proofhub_entry_id=?, sync_status=?, sync_message=?
-               WHERE id=?""",
+            """UPDATE entries SET approval_status='approved', reviewed_by=%s,
+               reviewed_at=%s, proofhub_entry_id=%s, sync_status=%s, sync_message=%s
+               WHERE id=%s""",
             (reviewer, _now(), proofhub_entry_id, sync_status, sync_message, entry_id),
         )
 
 
 def mark_rejected(entry_id, reviewer, reason):
-    with _lock, _conn() as c:
+    with _cur() as c:
         c.execute(
-            """UPDATE entries SET approval_status='rejected', reviewed_by=?,
-               reviewed_at=?, reject_reason=? WHERE id=?""",
+            """UPDATE entries SET approval_status='rejected', reviewed_by=%s,
+               reviewed_at=%s, reject_reason=%s WHERE id=%s""",
             (reviewer, _now(), reason, entry_id),
         )
 
 
 # ---------------------------------------------------------------- logs
 def log_email(to_email, subject, body, sent_ok, error=""):
-    with _lock, _conn() as c:
+    with _cur() as c:
         c.execute(
             """INSERT INTO email_log (to_email, subject, body, sent_ok, error, created_at)
-               VALUES (?,?,?,?,?,?)""",
+               VALUES (%s,%s,%s,%s,%s,%s)""",
             (to_email, subject, body, 1 if sent_ok else 0, error, _now()),
         )
 
 
 def audit(actor, action, detail=""):
-    with _lock, _conn() as c:
+    with _cur() as c:
         c.execute(
-            "INSERT INTO audit_log (actor, action, detail, created_at) VALUES (?,?,?,?)",
+            "INSERT INTO audit_log (actor, action, detail, created_at) VALUES (%s,%s,%s,%s)",
             (actor, action, json.dumps(detail) if not isinstance(detail, str) else detail, _now()),
         )

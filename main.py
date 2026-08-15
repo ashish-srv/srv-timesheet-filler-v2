@@ -48,7 +48,16 @@ def _roster_autosync_loop(interval_seconds):
 def _startup():
     db.init_db()
     # Preferred: live Google Sheets sync when configured.
-    if roster_sync.SA_JSON and roster_sync.ROSTER_SHEET_ID:
+    # Retention: drop finished (approved + synced) entries older than
+    # ENTRY_RETENTION_DAYS. Pending and rejected entries are never aged out.
+    try:
+        purged = db.purge_old_entries()
+        if purged:
+            print(f"[retention] purged {purged} old synced entries")
+    except Exception as e:
+        print("[retention] purge failed:", e)
+
+    if roster_sync.SA_CONFIGURED and roster_sync.ROSTER_SHEET_ID:
         try:
             summary = roster_sync.sync_now(actor="startup")
             print("[roster] startup sync:", summary)
@@ -180,7 +189,8 @@ def _notify_reviewer_of_submission(manager_email, submitter, entries):
         for to, nm in recipients:
             try:
                 emailer.send_submission_email(to, nm, who, submitter["email"],
-                                              len(entries), summary, review_url)
+                                              len(entries), summary, review_url,
+                                              entries=entries)
             except Exception as ex:
                 print("[notify] submission email failed:", ex)
 
@@ -228,6 +238,7 @@ async def me(request: Request):
         approver_name = (db.get_employee(approver_email) or {}).get("name", "") \
             or emp.get("manager_name", "")
     return JSONResponse({**user, "has_api_key": db.has_api_key(user["email"]),
+                         "api_key_updated_at": db.get_api_key_updated(user["email"]),
                          "approver_email": approver_email, "approver_name": approver_name})
 
 
@@ -248,6 +259,16 @@ async def save_key(request: Request, api_key: str = Form(...)):
     db.audit(user["email"], "save_api_key")
     projects = client.get_projects_list()
     return JSONResponse({"success": True, "message": "Connected", "projects": projects})
+
+
+@app.post("/disconnect-key")
+async def disconnect_key(request: Request):
+    """Forget the stored ProofHub key. Submitted entries are untouched — only
+    the credential is removed, and the user is asked to connect again."""
+    user = require_user(request)
+    removed = db.delete_api_key(user["email"])
+    db.audit(user["email"], "disconnect_api_key")
+    return JSONResponse({"success": True, "removed": removed})
 
 
 @app.get("/projects")
@@ -420,8 +441,19 @@ async def submit_csv(request: Request, preview_id: str = Form(...),
 
 @app.get("/my-entries")
 async def my_entries(request: Request):
+    """Only the user's most recent submissions are returned (default 3, set by
+    MY_ENTRIES_SUBMISSIONS). Older batches stay in the database for reporting
+    but are not shown here, so this view stays fast and readable."""
     user = require_user(request)
-    return JSONResponse({"entries": _attach_stage(db.list_entries_for_user(user["email"]))})
+    rows = db.list_entries_for_user(user["email"])
+    total_subs = db.count_submissions_for_user(user["email"])
+    shown_subs = len({r.get("batch_id") or r.get("submitted_at") for r in rows})
+    return JSONResponse({
+        "entries": _attach_stage(rows),
+        "submissions_shown": shown_subs,
+        "submissions_total": total_subs,
+        "limit": db.MY_ENTRIES_SUBMISSIONS,
+    })
 
 
 # ----------------------------------------------------------------------------
@@ -514,7 +546,8 @@ async def reject(request: Request, ids: str = Form(...), reason: str = Form(""))
         )
         ok, info = emailer.send_rejection_email(
             submitter, emp.get("name"), reason, summary,
-            manager_name=manager.get("name", ""), manager_email=manager.get("email", ""))
+            manager_name=manager.get("name", ""), manager_email=manager.get("email", ""),
+            entries=items)
         emailed.append({"submitter": submitter, "count": len(items), "email_ok": ok, "info": info})
 
     db.audit(manager["email"], "reject", {"ids": [e["id"] for e in entries], "reason": reason})

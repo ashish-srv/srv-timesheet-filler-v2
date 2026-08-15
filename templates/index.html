@@ -77,6 +77,7 @@ tr.rejected td { background:var(--red-bg); } tr.warning td { background:var(--am
   <img src="/assets/srv-logo.png" class="navbar-logo" alt="SRV" onerror="this.style.display='none'">
   <span class="navbar-title">Timesheet Compliance</span>
   <div class="navbar-right">
+    <a class="nav-link" id="settingsLink" href="#" onclick="openSettings(event)" style="display:none;">⚙ Settings</a>
     <a class="nav-link" id="managerLink" href="/manager" style="display:none;">Manager review</a>
     <a class="nav-link" id="adminLink" href="/admin" style="display:none;">Admin</a>
     <span class="nav-user" id="navUser"></span>
@@ -85,15 +86,25 @@ tr.rejected td { background:var(--red-bg); } tr.warning td { background:var(--am
 </div></nav>
 
 <div class="wrap">
-  <div class="card">
-    <h2>1 · Connect your ProofHub key</h2>
-    <div class="hint">Entered once and stored securely for your account. Time is logged to ProofHub under your key after your manager approves.</div>
+  <!-- Shown only until a key is stored; after that it lives behind Settings. -->
+  <div class="card" id="keyCard">
+    <h2 id="keyCardTitle">1 · Connect your ProofHub key</h2>
+    <div class="hint" id="keyCardHint">Entered once and stored securely for your account. Time is logged to ProofHub under your key after your manager approves.</div>
+    <div id="keyStatusRow" style="display:none; font-size:13px; margin-bottom:12px; background:#F0FDF4; border:1px solid #BBF7D0; color:#166534; border-radius:8px; padding:10px 13px;"></div>
     <div class="inline-key">
-      <div class="field"><label>ProofHub API Key</label><input type="password" id="apiKey" placeholder="Paste your API key" autocomplete="off"></div>
+      <div class="field"><label id="apiKeyLabel">ProofHub API Key</label><input type="password" id="apiKey" placeholder="Paste your API key" autocomplete="off"></div>
       <button class="btn btn-primary" id="connectBtn" onclick="saveKey()">Save &amp; connect</button>
+      <button class="btn btn-ghost" id="keyCancelBtn" onclick="closeSettings()" style="display:none;">Cancel</button>
     </div>
     <div class="toast" id="connectToast"></div>
-    <div id="approverNote" style="margin-top:14px; font-size:13px; color:#374151; background:#F9FAFB; border:1px solid var(--line); border-radius:8px; padding:10px 13px; display:none;"></div>
+    <div id="disconnectRow" style="display:none; margin-top:14px; padding-top:12px; border-top:1px solid var(--line); font-size:13px; color:var(--muted);">
+      Signing in on a different ProofHub account? <a class="link" href="#" onclick="disconnectKey(event)">Remove the stored key</a> — your submitted entries are not affected.
+    </div>
+  </div>
+
+  <!-- Approver note is independent of the key card, so it stays visible. -->
+  <div class="card" id="approverCard" style="display:none; padding:14px 18px;">
+    <div id="approverNote" style="font-size:13px; color:#374151;"></div>
   </div>
 
   <div class="card">
@@ -146,6 +157,8 @@ tr.rejected td { background:var(--red-bg); } tr.warning td { background:var(--am
           <div class="table-scroll"><table id="previewTable"><thead><tr><th>#</th><th>Status</th><th>Project</th><th>Timesheet</th><th>Date</th><th>H</th><th>M</th><th>Billable</th><th>Description</th><th>Notes</th></tr></thead><tbody></tbody></table></div>
           <label class="chk"><input type="checkbox" id="inclWarnings" checked> Include warning rows</label>
           <button class="btn btn-primary" id="submitCsvBtn" onclick="submitCsv()">Submit valid rows for approval</button>
+          <button class="btn btn-ghost" id="dlRejectedBtn" onclick="downloadRejectedRows()" style="display:none; margin-left:8px;">Download invalid entries</button>
+          <div class="hint" id="dlRejectedHint" style="margin-top:8px;">Rejected rows download with an <b>error_reason</b> column explaining each failure. Fix them in that file and upload it again — the extra column is ignored on re-upload.</div>
           <div class="toast" id="csvSubmitToast"></div>
         </div>
       </div>
@@ -154,7 +167,7 @@ tr.rejected td { background:var(--red-bg); } tr.warning td { background:var(--am
     <!-- My Entries (status) — visible without needing the key -->
     <div class="tab-panel" id="panelMine">
       <div style="display:flex; align-items:center; gap:12px; margin-bottom:4px;">
-        <div class="hint" style="margin:0;">Track every entry you've submitted and where it is in the approval workflow. Updates automatically.</div>
+        <div class="hint" style="margin:0;" id="mineScopeNote">Track your recent submissions and where they are in the approval workflow. Updates automatically.</div>
         <button class="btn btn-ghost" style="margin-left:auto; padding:7px 14px;" onclick="loadMyEntries()">Refresh</button>
       </div>
       <div class="stat-cards" id="mineStats"></div>
@@ -173,6 +186,40 @@ tr.rejected td { background:var(--red-bg); } tr.warning td { background:var(--am
 
 <script>
 let previewId = null;
+let previewRows = [];
+
+// ---- Download the rows that failed validation ----
+// Same headers as the upload template (plus an error_reason column the
+// validator ignores), so the user can fix the file and re-upload it directly.
+const DL_COLUMNS = ['project_name','timesheet_title','date','logged_hours',
+                    'logged_mins','status','description','error_reason'];
+
+function csvCell(v){
+  const s = (v===null||v===undefined) ? '' : String(v);
+  return /[",\n\r]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s;
+}
+
+function downloadRejectedRows(){
+  const bad = previewRows.filter(r=>r.row_status==='rejected');
+  if(!bad.length){ return; }
+  const lines = [DL_COLUMNS.join(',')];
+  bad.forEach(r=>{
+    lines.push([
+      r.project_name, r.timesheet_title||'', r.date, r.logged_hours,
+      r.logged_mins, r.status, r.description,
+      (r.messages||[]).join(' | ')
+    ].map(csvCell).join(','));
+  });
+  // BOM so Excel on Windows opens the file with correct encoding.
+  const blob = new Blob(['﻿'+lines.join('\r\n')],
+                        {type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const stamp = new Date().toISOString().slice(0,10);
+  a.href = url; a.download = 'invalid_entries_'+stamp+'.csv';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  setTimeout(()=>URL.revokeObjectURL(url), 1000);
+}
 let batch = [];
 
 function todayStr(){ const d=new Date(); const o=d.getTimezoneOffset(); return new Date(d.getTime()-o*60000).toISOString().slice(0,10); }
@@ -190,14 +237,99 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (me.approver_name || me.approver_email) {
       an.innerHTML = '👤 Your entries are sent to <b>' + esc(me.approver_name || me.approver_email)
         + '</b>' + (me.approver_email ? ' (' + esc(me.approver_email) + ')' : '') + ' for approval.';
-      an.style.display = 'block';
     } else {
       an.innerHTML = '⚠ No manager is set for your account — an admin will review your entries.';
-      an.style.display = 'block';
     }
-    if (me.has_api_key) { await loadProjects(); }
+    document.getElementById('approverCard').style.display = 'block';
+
+    keyUpdatedAt = me.api_key_updated_at || '';
+    if (me.has_api_key) {
+      // Returning user: no key prompt. Hide the card and go straight to work.
+      hideKeyCard();
+      document.getElementById('settingsLink').style.display = 'inline';
+      await loadProjects();
+    } else {
+      // First sign-in: the key card is the only thing to do.
+      showKeyCard(false);
+    }
   } catch(e){}
 });
+
+// ---- ProofHub key: first-run card vs. Settings panel ----
+let keyUpdatedAt = '';
+let settingsMode = false;   // true = card was opened from Settings, not first run
+
+function hideKeyCard(){
+  document.getElementById('keyCard').style.display = 'none';
+  settingsMode = false;
+}
+
+function showKeyCard(fromSettings){
+  settingsMode = !!fromSettings;
+  const card = document.getElementById('keyCard');
+  card.style.display = 'block';
+  document.getElementById('keyCardTitle').textContent =
+    fromSettings ? 'ProofHub connection' : '1 · Connect your ProofHub key';
+  document.getElementById('keyCardHint').textContent = fromSettings
+    ? 'Your key is already saved. Enter a new one only if you want to replace it — for example after regenerating it in ProofHub.'
+    : 'Entered once and stored securely for your account. Time is logged to ProofHub under your key after your manager approves.';
+  document.getElementById('apiKeyLabel').textContent =
+    fromSettings ? 'New ProofHub API Key' : 'ProofHub API Key';
+  document.getElementById('apiKey').placeholder =
+    fromSettings ? 'Paste a new key to replace the saved one' : 'Paste your API key';
+  document.getElementById('connectBtn').textContent =
+    fromSettings ? 'Replace key' : 'Save & connect';
+  document.getElementById('keyCancelBtn').style.display = fromSettings ? '' : 'none';
+  document.getElementById('disconnectRow').style.display = fromSettings ? 'block' : 'none';
+
+  const statusRow = document.getElementById('keyStatusRow');
+  if (fromSettings){
+    statusRow.style.display = 'block';
+    statusRow.innerHTML = '✓ <b>Connected.</b> A ProofHub key is saved for your account'
+      + (keyUpdatedAt ? ' (last updated ' + esc(keyUpdatedAt) + ')' : '') + '.';
+  } else {
+    statusRow.style.display = 'none';
+  }
+  document.getElementById('connectToast').style.display = 'none';
+  document.getElementById('apiKey').value = '';
+}
+
+function openSettings(ev){
+  if(ev) ev.preventDefault();
+  showKeyCard(true);
+  document.getElementById('keyCard').scrollIntoView({behavior:'smooth', block:'start'});
+}
+
+function closeSettings(){
+  hideKeyCard();
+  window.scrollTo({top:0, behavior:'smooth'});
+}
+
+// Stored key stopped working (regenerated or revoked in ProofHub). Bring the
+// card back automatically so the user is never stuck with no way to fix it.
+function forceReconnect(message){
+  document.getElementById('settingsLink').style.display = 'inline';
+  showKeyCard(false);
+  document.getElementById('keyCardTitle').textContent = 'Reconnect your ProofHub key';
+  document.getElementById('keyCardHint').textContent =
+    'Your saved key is no longer working. Paste a current key to carry on.';
+  showToast('connectToast', false, '✗ ' + (message || 'Saved key is no longer valid.'));
+}
+
+async function disconnectKey(ev){
+  if(ev) ev.preventDefault();
+  if(!confirm('Remove the stored ProofHub key? You will need to paste a key again before submitting time. Entries you have already submitted are not affected.')) return;
+  try{
+    const data = await (await fetch('/disconnect-key',{method:'POST'})).json();
+    if(data.success){
+      keyUpdatedAt = '';
+      document.getElementById('settingsLink').style.display = 'none';
+      document.getElementById('workBody').classList.add('locked');
+      showKeyCard(false);
+      showToast('connectToast', true, 'Stored key removed. Paste a key to reconnect.');
+    }
+  }catch(e){ showToast('connectToast', false, '✗ Network error.'); }
+}
 
 async function saveKey(){
   const key=document.getElementById('apiKey').value.trim();
@@ -206,16 +338,42 @@ async function saveKey(){
   const fd=new FormData(); fd.append('api_key',key);
   try{
     const data=await (await fetch('/save-key',{method:'POST',body:fd})).json();
-    if(data.success){ showToast('connectToast',true,'✓ Connected. Loaded '+data.projects.length+' project(s).'); fillProjects(data.projects); unlock(); }
+    if(data.success){
+      fillProjects(data.projects); unlock();
+      keyUpdatedAt = new Date().toISOString().slice(0,19).replace('T',' ');
+      document.getElementById('settingsLink').style.display = 'inline';
+      const wasSettings = settingsMode;
+      hideKeyCard();
+      // Card is gone now, so confirm in a place that's still on screen.
+      showBanner(wasSettings
+        ? '✓ ProofHub key replaced. Loaded ' + data.projects.length + ' project(s).'
+        : '✓ Connected to ProofHub. Loaded ' + data.projects.length + ' project(s).');
+    }
     else showToast('connectToast',false,'✗ '+(data.message||'Could not connect.'));
   }catch(e){ showToast('connectToast',false,'✗ Network error.'); }
-  btn.disabled=false; btn.textContent='Save & connect';
+  btn.disabled=false;
+  btn.textContent = settingsMode ? 'Replace key' : 'Save & connect';
+}
+
+// Transient confirmation shown at the top of the page (the key card may be hidden).
+function showBanner(msg){
+  let b=document.getElementById('globalBanner');
+  if(!b){
+    b=document.createElement('div'); b.id='globalBanner';
+    b.style.cssText='position:fixed;top:70px;left:50%;transform:translateX(-50%);'
+      +'background:#065F46;color:#fff;padding:11px 20px;border-radius:8px;font-size:14px;'
+      +'font-weight:600;z-index:999;box-shadow:0 4px 14px rgba(0,0,0,.18);';
+    document.body.appendChild(b);
+  }
+  b.textContent=msg; b.style.display='block';
+  clearTimeout(b._t); b._t=setTimeout(()=>{ b.style.display='none'; }, 4000);
 }
 
 async function loadProjects(){
   try{
     const data=await (await fetch('/projects')).json();
-    if(data.success){ fillProjects(data.projects); unlock(); showToast('connectToast',true,'✓ Connected ('+data.projects.length+' projects).'); }
+    if(data.success){ fillProjects(data.projects); unlock(); }
+    else forceReconnect(data.message);
   }catch(e){}
 }
 
@@ -309,6 +467,12 @@ async function previewCsv(){
 }
 function chip(cls,label,n){ return '<div class="chip '+cls+'">'+label+' <span class="n">'+n+'</span></div>'; }
 function renderPreview(rows,s){
+  previewRows = rows || [];
+  const rejBtn = document.getElementById('dlRejectedBtn');
+  if(rejBtn){
+    rejBtn.style.display = s.rejected ? 'inline-flex' : 'none';
+    rejBtn.textContent = 'Download invalid entries ('+s.rejected+')';
+  }
   document.getElementById('summaryChips').innerHTML=chip('total','Total',s.total)+chip('accepted','Accepted',s.accepted)+chip('warning','Warnings',s.warning)+chip('rejected','Rejected',s.rejected);
   const tb=document.querySelector('#previewTable tbody'); tb.innerHTML='';
   rows.forEach(r=>{ const tr=document.createElement('tr'); tr.className=r.row_status;
@@ -340,8 +504,22 @@ async function loadMyEntries(){
   try{
     const data=await (await fetch('/my-entries')).json();
     mineEntries=data.entries||[];
+    updateMineScopeNote(data);
   }catch(e){ mineEntries=[]; }
   renderMine();
+}
+
+// Tell the user exactly what this view covers, so nothing looks "missing".
+function updateMineScopeNote(data){
+  const el=document.getElementById('mineScopeNote'); if(!el) return;
+  const shown=data.submissions_shown||0, total=data.submissions_total||0, lim=data.limit||3;
+  let txt='Showing your last '+lim+' submission'+(lim===1?'':'s')
+         +' and where each entry is in the approval workflow. Updates automatically.';
+  if(total>shown){
+    txt+=' ('+shown+' of '+total+' submissions shown — older ones are archived. '
+        +'Ask an admin if you need them.)';
+  }
+  el.textContent=txt;
 }
 
 function countBy(code){ return mineEntries.filter(e=>e.stage_code===code).length; }
@@ -370,7 +548,7 @@ function renderMine(){
 
   const wrap=document.getElementById('mineTableWrap'); const empty=document.getElementById('mineEmpty');
   const tb=document.querySelector('#mineTable tbody'); tb.innerHTML='';
-  if(!rows.length){ wrap.style.display='none'; empty.style.display='block'; empty.textContent = total? 'No entries in this category.' : 'No entries yet. Add time or upload a CSV to get started.'; return; }
+  if(!rows.length){ wrap.style.display='none'; empty.style.display='block'; empty.textContent = total? 'No entries in this category in your recent submissions.' : 'No entries yet. Add time or upload a CSV to get started.'; return; }
   wrap.style.display='block'; empty.style.display='none';
   rows.forEach(e=>{
     let details='';

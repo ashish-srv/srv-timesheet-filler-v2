@@ -1,0 +1,20 @@
+run = "python -m uvicorn main:app --host 0.0.0.0 --port 5000 --proxy-headers --forwarded-allow-ips='*'"
+modules = ["python-3.11"]
+
+[nix]
+channel = "stable-24_05"
+
+[deployment]
+# Reserved VM keeps one long-lived process, which this app needs:
+#   - the roster auto-sync background thread
+#   - the approve/push job threads and their in-memory progress
+#   - the in-memory CSV preview store (preview -> submit must hit one instance)
+deploymentTarget = "vm"
+run = ["sh", "-c", "python -m uvicorn main:app --host 0.0.0.0 --port 5000 --proxy-headers --forwarded-allow-ips='*'"]
+
+[[ports]]
+localPort = 5000
+externalPort = 80
+
+[env]
+PYTHONUNBUFFERED = "1"

@@ -15,8 +15,14 @@ from datetime import datetime
 from . import db
 
 SA_JSON = os.environ.get("GOOGLE_SA_JSON", "")          # path to service-account json
+# Preferred on Replit: paste the whole service-account JSON into a Secret so no
+# credential file ever exists on disk or in the repo.
+SA_JSON_CONTENT = os.environ.get("GOOGLE_SA_JSON_CONTENT", "").strip()
 ROSTER_SHEET_ID = os.environ.get("ROSTER_SHEET_ID", "")  # spreadsheet id
 ROSTER_WORKSHEET = os.environ.get("ROSTER_WORKSHEET", "")  # tab name (blank = first)
+
+# True when either credential source is available.
+SA_CONFIGURED = bool(SA_JSON_CONTENT or SA_JSON)
 
 
 def normalize(h):
@@ -111,12 +117,26 @@ def map_norm_rows(norm_rows):
 def fetch_values_from_sheet():
     """Read the sheet via gspread + service account. Returns list-of-lists.
     Raises if not configured or on API error."""
-    if not (SA_JSON and ROSTER_SHEET_ID):
-        raise RuntimeError("Sheets sync not configured (GOOGLE_SA_JSON / ROSTER_SHEET_ID).")
+    if not (SA_CONFIGURED and ROSTER_SHEET_ID):
+        raise RuntimeError(
+            "Sheets sync not configured (set GOOGLE_SA_JSON_CONTENT or "
+            "GOOGLE_SA_JSON, plus ROSTER_SHEET_ID)."
+        )
+    import json as _json
     import gspread
     from google.oauth2.service_account import Credentials
     scopes = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
-    creds = Credentials.from_service_account_file(SA_JSON, scopes=scopes)
+    if SA_JSON_CONTENT:
+        try:
+            info = _json.loads(SA_JSON_CONTENT)
+        except ValueError as e:
+            raise RuntimeError(
+                "GOOGLE_SA_JSON_CONTENT is not valid JSON. Paste the entire "
+                f"service-account file contents into the secret. ({e})"
+            )
+        creds = Credentials.from_service_account_info(info, scopes=scopes)
+    else:
+        creds = Credentials.from_service_account_file(SA_JSON, scopes=scopes)
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(ROSTER_SHEET_ID)
     ws = sh.worksheet(ROSTER_WORKSHEET) if ROSTER_WORKSHEET else sh.sheet1

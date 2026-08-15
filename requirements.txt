@@ -1,5 +1,5 @@
 fastapi
-uvicorn
+uvicorn[standard]
 pandas
 requests
 python-dateutil
@@ -11,3 +11,5 @@ itsdangerous
 httpx
 gspread
 google-auth
+psycopg[binary]
+psycopg-pool
